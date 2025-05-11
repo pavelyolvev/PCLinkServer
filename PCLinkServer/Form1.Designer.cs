@@ -31,6 +31,7 @@ partial class Form1
     {
         button1 = new System.Windows.Forms.Button();
         LogList = new System.Windows.Forms.ListBox();
+        button2 = new System.Windows.Forms.Button();
         SuspendLayout();
         // 
         // button1
@@ -53,16 +54,29 @@ partial class Form1
         LogList.Size = new System.Drawing.Size(618, 304);
         LogList.TabIndex = 1;
         // 
+        // button2
+        // 
+        button2.Location = new System.Drawing.Point(189, 31);
+        button2.Name = "button2";
+        button2.Size = new System.Drawing.Size(164, 30);
+        button2.TabIndex = 2;
+        button2.Text = "GetCode";
+        button2.UseVisualStyleBackColor = true;
+        button2.Click += OnGetCodeClick;
+        // 
         // Form1
         // 
         AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
         AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
         ClientSize = new System.Drawing.Size(800, 450);
+        Controls.Add(button2);
         Controls.Add(LogList);
         Controls.Add(button1);
         Text = "Form1";
         ResumeLayout(false);
     }
+
+    private System.Windows.Forms.Button button2;
 
     private System.Windows.Forms.ListBox LogList;
 

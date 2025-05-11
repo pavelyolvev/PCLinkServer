@@ -1,7 +1,9 @@
 using System.Drawing.Imaging;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using PCLink;
 
 namespace PCLinkServer;
@@ -31,12 +33,17 @@ public partial class Form1 : Form
     private static object lockObject = new object(); // Для синхронизации доступа к isStreaming
     private const int COMMAND_PORT = 12312;
     private const int APP_PORT = 12311;
+    private HashSet<string> trustedIps = new HashSet<string>();
+    private Dictionary<string, int> pendingAuthCodes = new Dictionary<string, int>();
+
     public Form1()
     {
         InitializeComponent();
-        Thread appRunningThread = new Thread(StartUdpCommandServer);
-        appRunningThread.IsBackground = true;
-        appRunningThread.Start();
+        Task app = StartAsync(COMMAND_PORT);
+        
+        // Thread appRunningThread = new Thread(StartUdpCommandServer);
+        // appRunningThread.IsBackground = true;
+        // appRunningThread.Start();
     }
 
     // void StartAppServer()
@@ -88,6 +95,100 @@ public partial class Form1 : Form
 
     private static object targetEndPointLock = new object();
 
+    public class UdpMessage
+    {
+        public int id { get; set; }
+        public string message { get; set; }
+        public string[] parameters { get; set; }
+    }
+    
+    private UdpClient _udpClient;
+
+    public async Task StartAsync(int port)
+    {
+        _udpClient = new UdpClient(port);
+        Console.WriteLine($"UDP-сервер запущен на порту {port}");
+
+        while (true)
+        {
+            var result = await _udpClient.ReceiveAsync();
+            var jsonString = Encoding.UTF8.GetString(result.Buffer);
+
+            try
+            {
+                Console.WriteLine($"Получено string: msg={jsonString}");
+                var message = JsonSerializer.Deserialize<UdpMessage>(jsonString);
+                Console.WriteLine($"Получено: id={message.id}, msg={message.message}");
+                string respMessage = ResponseSelector(message, result.RemoteEndPoint);
+                string[] parStrings = [];
+                if (respMessage.Equals("AUTH_SUCCEED"))
+                {
+                    string macAdress = GetMacAddress();
+                    parStrings = new[] { macAdress };
+                }
+                mc.HandleCmd(message.message);
+                // Пример ответа
+                var response = new UdpMessage
+                {
+                    id = message.id,
+                    message = respMessage,
+                    parameters = parStrings
+                };
+                var responseJson = JsonSerializer.Serialize(response);
+                var responseBytes = Encoding.UTF8.GetBytes(responseJson);
+
+                // Отправить ответ обратно клиенту
+                await _udpClient.SendAsync(responseBytes, responseBytes.Length, result.RemoteEndPoint);
+            }
+            catch (JsonException ex)
+            {
+                Console.WriteLine("Ошибка при разборе JSON: " + ex.Message);
+            }
+        }
+    }
+    Authentification _auth = new Authentification();
+    string ResponseSelector(UdpMessage message, IPEndPoint sendPoint)
+    {
+        switch (message.message)
+        {
+            case "REQUEST_ACCESS":
+                string response = "ACCESS_DENIED";
+                AccessRecord? record = _auth.GetRecordByIp(sendPoint.Address.ToString());
+                if (record.HasValue && record.Value.Ip.Equals(sendPoint.Address.ToString()))
+                {
+                    if(record.Value.AuthCode.ToString().Equals(message.parameters[0]))
+                        response = "ACCESS_GRANTED";    
+                }
+                return response;
+            case "AUTH_START":
+                int code = _auth.GenerateCode();
+                Log($"Новый клиент. Код: {code}");
+                return "CODE_GENERATED";
+            case "AUTH":
+                if (_auth.ReadCode(message.parameters[0]))
+                {
+                    _auth.SaveNewRecord(sendPoint.Address.ToString(), message.parameters[1], _auth.Code);
+                    Log($"Новый клиент сохранен. Авторизация успешна");
+                    return "AUTH_SUCCEED";
+                }
+                return "AUTH_FAILED";
+        }
+
+        return "UNKNOWN_REQUEST";
+    }
+    string GetMacAddress()
+    {
+        foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus == OperationalStatus.Up &&
+                nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+            {
+                var macBytes = nic.GetPhysicalAddress().GetAddressBytes();
+                return string.Join(":", macBytes.Select(b => b.ToString("X2")));
+            }
+        }
+        return "MAC_NOT_FOUND";
+    }
     private void StartUdpCommandServer()
     {
         udpServer = new UdpClient(COMMAND_PORT);
@@ -101,6 +202,36 @@ public partial class Form1 : Form
                 string cmd = Encoding.UTF8.GetString(data);
 
                 Log($"Received command: {cmd} from {remoteEP.Address}");
+                if (!trustedIps.Contains(remoteEP.Address.ToString()))
+                {
+                    if (cmd.StartsWith("AUTH:"))
+                    {
+                        if (int.TryParse(cmd.Substring("AUTH:".Length), out int receivedCode) &&
+                            pendingAuthCodes.TryGetValue(remoteEP.Address.ToString(), out int correctCode) &&
+                            receivedCode == correctCode)
+                        {
+                            trustedIps.Add(remoteEP.Address.ToString());
+                            pendingAuthCodes.Remove(remoteEP.Address.ToString());
+                            Log($"Клиент {remoteEP.Address} успешно аутентифицирован.");
+                        }
+                        else
+                        {
+                            Log($"Неверный код от {remoteEP.Address}");
+                        }
+                    }
+                    else
+                    {
+                        // Сгенерировать и отправить код подтверждения
+                        if (!pendingAuthCodes.ContainsKey(remoteEP.Address.ToString()))
+                        {
+                            int code = new Random().Next(1000, 10000);
+                            // int code = 1234;
+                            pendingAuthCodes[remoteEP.Address.ToString()] = code;
+                            Log($"Новый клиент: {remoteEP.Address}\nКод: {code}");
+                        }
+                        return; // Необработанный клиент — отклоняем
+                    }
+                }
 
                 // --- Обработка команды CLIENT_IP ---
                 if (cmd.StartsWith("CLIENT_IP:"))
@@ -307,5 +438,10 @@ public partial class Form1 : Form
         {
             LogList.Items.Add($"[{DateTime.Now:T}] {message}");
         });
+    }
+
+    private void OnGetCodeClick(object sender, EventArgs e)
+    {
+        
     }
 }

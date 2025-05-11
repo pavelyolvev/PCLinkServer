@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
+using PCLinkServer;
 using WindowsInput;
 using WindowsInput.Native;
 
@@ -34,15 +35,41 @@ namespace PCLink
             }
             else if (cmd == "CLICK")
             {
-                mouse_event(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                sim.Mouse.LeftButtonClick();
+                //mouse_event(MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
             }
             else if (cmd.StartsWith("SCROLL:"))
             {
                 if (int.TryParse(cmd.Substring(7), out int delta))
                 {
-                    sim.Mouse.VerticalScroll(delta);
+                    MouseScroll.SendVerticalScroll(delta);
+                    //sim.Mouse.VerticalScroll(Math.Clamp(delta, -1, 1));
                 }
             }
+            else if (cmd.StartsWith("HSCROLL:"))
+            {
+                if (int.TryParse(cmd.Substring(8), out int delta))
+                {
+                    MouseScroll.SendHorizontalScroll(delta);
+                    //sim.Mouse.HorizontalScroll(Math.Clamp(delta, -1, 1));
+                }
+            }
+            else if (cmd == "RIGHTCLICK")
+            {
+                sim.Mouse.RightButtonClick();
+                //mouse_event(0x08 | 0x10, 0, 0, 0, UIntPtr.Zero); // RIGHTDOWN | RIGHTUP
+            }
+            else if (cmd.StartsWith("ZOOM:"))
+            {
+                // можно эмулировать Ctrl + Scroll
+                if (int.TryParse(cmd.Substring(5), out int delta))
+                {
+                    sim.Keyboard.KeyDown(VirtualKeyCode.CONTROL);
+                    sim.Mouse.VerticalScroll(delta);
+                    sim.Keyboard.KeyUp(VirtualKeyCode.CONTROL);
+                }
+            }
+
         }
     }
 }
