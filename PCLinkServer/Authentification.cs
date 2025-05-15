@@ -34,9 +34,6 @@ public class Authentification()
                 record.AccessMode = accessMode;
                 
                 accessList[accessList.FindIndex(record => record.Ip == ip)] = record;
-                Console.WriteLine("Edited?");
-                Console.WriteLine(record.AuthCode);
-                Console.WriteLine(accessList.Find(record => record.Ip == ip).AuthCode);
                 // accessList.Add(new AccessRecord(accessList.Count, ip, accessMode, code));  
             }
             catch (Exception e)

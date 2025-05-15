@@ -11,7 +11,8 @@ namespace PCLinkServer;
 public partial class Form1 : Form
 {
     private bool isRunning = true;
-    private MouseControl mc = new MouseControl();
+    private bool serverIsRunning = false;
+    private InputControl mc = new InputControl();
 // --- Настройки ---
     private static string targetIpAddress = "192.168.31.183"; // !!! ЗАМЕНИТЕ НА IP ВАШЕГО ТЕЛЕФОНА !!!
     private static int targetPort = 9050;
@@ -36,25 +37,58 @@ public partial class Form1 : Form
     private HashSet<string> trustedIps = new HashSet<string>();
     private Dictionary<string, int> pendingAuthCodes = new Dictionary<string, int>();
 
+    private Preference preference;
+    private CancellationTokenSource _cancellationTokenSource;
+    private Task serverTask;
+
     public Form1()
     {
         InitializeComponent();
-        Task app = StartAsync(COMMAND_PORT);
-        
+        preference = Preferences.GetPreference();
+        StatusSet("Выключен");
+        loadPreferences();
+
         // Thread appRunningThread = new Thread(StartUdpCommandServer);
         // appRunningThread.IsBackground = true;
         // appRunningThread.Start();
     }
 
-    // void StartAppServer()
-    // {
-    //     udpServer = new UdpClient(APP_PORT);
-    //     IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
-    //     while (true)
-    //     {
-    //         
-    //     }
-    // }
+    private void OnOpen(object sender, EventArgs e)
+    {
+        this.Show();
+        this.ShowInTaskbar = true;
+        this.WindowState = FormWindowState.Normal;
+    }
+
+    private void OnExit(object sender, EventArgs e)
+    {
+        notifyIcon1.Visible = false;
+        Application.Exit();
+    }
+
+    private void OnTrayIconDoubleClick(object sender, EventArgs e)
+    {
+        this.Show();
+        this.ShowInTaskbar = true;
+        this.WindowState = FormWindowState.Normal;
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (this.WindowState == FormWindowState.Minimized)
+        {
+            this.Hide(); // Скрываем окно, чтобы оно не появлялось на панели задач
+        }
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        // notifyIcon1.Visible = false; // Убираем иконку из трея при завершении
+        // base.OnFormClosing(e);
+        this.WindowState = FormWindowState.Minimized;
+        this.Hide();
+    }
     private void button1_Click(object sender, EventArgs e)
     {
         // Thread commandThread = new Thread(StartUdpCommandServer);
@@ -104,48 +138,77 @@ public partial class Form1 : Form
     
     private UdpClient _udpClient;
 
-    public async Task StartAsync(int port)
+    public async Task StartAsync(int port, CancellationToken token)
     {
+        StatusSet("Ожидает подключения");
         _udpClient = new UdpClient(port);
         Console.WriteLine($"UDP-сервер запущен на порту {port}");
-
-        while (true)
+        NotifyThroughIcon("PCLink", "Сервер запущен", 3000);
+        try
         {
-            var result = await _udpClient.ReceiveAsync();
-            var jsonString = Encoding.UTF8.GetString(result.Buffer);
-
-            try
+            while (!token.IsCancellationRequested)
             {
-                Console.WriteLine($"Получено string: msg={jsonString}");
-                var message = JsonSerializer.Deserialize<UdpMessage>(jsonString);
-                Console.WriteLine($"Получено: id={message.id}, msg={message.message}");
-                string respMessage = ResponseSelector(message, result.RemoteEndPoint);
-                string[] parStrings = [];
-                if (respMessage.Equals("AUTH_SUCCEED"))
+                var resultTask = _udpClient.ReceiveAsync();
+                var completedTask = await Task.WhenAny(resultTask, Task.Delay(-1, token));
+
+                if (completedTask == resultTask)
                 {
-                    string macAdress = GetMacAddress();
-                    parStrings = new[] { macAdress };
+                    var result = resultTask.Result;
+                    var jsonString = Encoding.UTF8.GetString(result.Buffer);
+
+                    try
+                    {
+                        Console.WriteLine($"Получено string: msg={jsonString}");
+                        var message = JsonSerializer.Deserialize<UdpMessage>(jsonString);
+                        Console.WriteLine($"Получено: id={message.id}, msg={message.message}");
+
+                        string respMessage = ResponseSelector(message, result.RemoteEndPoint);
+                        string[] parStrings = [];
+
+                        if (respMessage.Equals("AUTH_SUCCEED"))
+                        {
+                            string macAdress = GetMacAddress();
+                            parStrings = new[] { macAdress };
+                        }
+
+                        mc.HandleCmd(message.message, message.parameters);
+
+                        var response = new UdpMessage
+                        {
+                            id = message.id,
+                            message = respMessage,
+                            parameters = parStrings
+                        };
+
+                        var responseJson = JsonSerializer.Serialize(response);
+                        var responseBytes = Encoding.UTF8.GetBytes(responseJson);
+
+                        await _udpClient.SendAsync(responseBytes, responseBytes.Length, result.RemoteEndPoint);
+                    }
+                    catch (JsonException ex)
+                    {
+                        Console.WriteLine("Ошибка при разборе JSON: " + ex.Message);
+                    }
                 }
-                mc.HandleCmd(message.message);
-                // Пример ответа
-                var response = new UdpMessage
+                else
                 {
-                    id = message.id,
-                    message = respMessage,
-                    parameters = parStrings
-                };
-                var responseJson = JsonSerializer.Serialize(response);
-                var responseBytes = Encoding.UTF8.GetBytes(responseJson);
-
-                // Отправить ответ обратно клиенту
-                await _udpClient.SendAsync(responseBytes, responseBytes.Length, result.RemoteEndPoint);
-            }
-            catch (JsonException ex)
-            {
-                Console.WriteLine("Ошибка при разборе JSON: " + ex.Message);
+                    // Отмена сработала
+                    NotifyThroughIcon("PCLink", "Сервер выключен", 3000);
+                    StatusSet("Выключен");
+                    break;
+                }
             }
         }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("Сервер остановлен.");
+        }
+        finally
+        {
+            _udpClient?.Close();
+        }
     }
+
     Authentification _auth = new Authentification();
     string ResponseSelector(UdpMessage message, IPEndPoint sendPoint)
     {
@@ -156,22 +219,61 @@ public partial class Form1 : Form
                 AccessRecord? record = _auth.GetRecordByIp(sendPoint.Address.ToString());
                 if (record.HasValue && record.Value.Ip.Equals(sendPoint.Address.ToString()))
                 {
-                    if(record.Value.AuthCode.ToString().Equals(message.parameters[0]))
-                        response = "ACCESS_GRANTED";    
+                    if (record.Value.AuthCode.ToString().Equals(message.parameters[0]))
+                    {
+                        StatusSet("Подключено");
+                        response = "ACCESS_GRANTED";   
+                    }
                 }
                 return response;
             case "AUTH_START":
                 int code = _auth.GenerateCode();
-                Log($"Новый клиент. Код: {code}");
+                new CodeForm(code.ToString()).Show();
+                // MessageBox.Show($@"Новый клиент. Код: {code}");
+
                 return "CODE_GENERATED";
+            case "END":
+                StatusSet("Ожидает подключения");
+                return "END";
             case "AUTH":
                 if (_auth.ReadCode(message.parameters[0]))
                 {
                     _auth.SaveNewRecord(sendPoint.Address.ToString(), message.parameters[1], _auth.Code);
-                    Log($"Новый клиент сохранен. Авторизация успешна");
+                    // MessageBox.Show(@"Новый клиент сохранен. Авторизация успешна");
+                    NotifyThroughIcon("Авторизация успешна", "клиент сохранен", 5000);
                     return "AUTH_SUCCEED";
                 }
                 return "AUTH_FAILED";
+            case "PC_SLEEP":
+                if (preference.isAllowedSleep)
+                {
+                    ExtraFucntions.SleepWindows();
+                    return "PC_SLEPT";    
+                }
+                else
+                {
+                    return "NOT_ALLOWED";
+                }
+            case "PC_SHUTDOWN":
+                if (preference.isAllowedShutdown)
+                {
+                    ExtraFucntions.ShutdownWindows();
+                    return "PC_SHUTDOWN";    
+                }
+                else
+                {
+                    return "NOT_ALLOWED";
+                }
+            case "PC_RESTART":
+                if (preference.isAllowedRestart)
+                {
+                    ExtraFucntions.RestartWindows();
+                    return "PC_RESTARTED";    
+                }
+                else
+                {
+                    return "NOT_ALLOWED";
+                }
         }
 
         return "UNKNOWN_REQUEST";
@@ -263,7 +365,7 @@ public partial class Form1 : Form
                 lastClientEP = remoteEP;
 
                 // Обработка других команд (MOVE, CLICK, MODE)
-                this.Invoke(() => mc.HandleCmd(cmd));
+                // this.Invoke(() => mc.HandleCmd(cmd));
             }
             catch (SocketException sex)
             {
@@ -434,14 +536,127 @@ public partial class Form1 : Form
 
     private void Log(string message)
     {
-        Invoke(() =>
-        {
-            LogList.Items.Add($"[{DateTime.Now:T}] {message}");
-        });
+        // Invoke(() =>
+        // {
+        //     LogList.Items.Add($"[{DateTime.Now:T}] {message}");
+        // });
     }
 
-    private void OnGetCodeClick(object sender, EventArgs e)
+
+    private void loadPreferences()
+    {
+        checkBox1.Checked = preference.isAllowedShutdown;
+        checkBox2.Checked = preference.isAllowedRestart;
+        checkBox3.Checked = preference.isAllowedSleep;
+        checkBox4.Checked = preference.startOnSystem;
+        checkBox5.Checked = preference.startMinimized;
+        checkBox6.Checked = preference.isAllowedVideo;
+        checkBox7.Checked = preference.autoLaunch;
+
+        if (preference.startMinimized)
+        {
+            this.WindowState = FormWindowState.Minimized;
+            this.ShowInTaskbar = false;
+            this.Hide();
+        }
+
+        if (preference.autoLaunch)
+        {
+            _cancellationTokenSource = new CancellationTokenSource();
+            serverTask = StartAsync(COMMAND_PORT, _cancellationTokenSource.Token);
+            onOffToolStripMenuItem.Text = "Выключить";
+        }
+    }
+
+    private void StatusSet(String message)
+    {
+        statusLbl.Text = message;
+        statusToolStripMenuItem.Text = message;
+        switch (message)
+        {
+            case "Выключен":
+                statusLbl.ForeColor = Color.Brown;
+                statusToolStripMenuItem.ForeColor = Color.Brown;
+                break;
+            case "Ожидает подключения":
+                statusLbl.ForeColor = Color.DarkOrange;
+                statusToolStripMenuItem.ForeColor = Color.DarkOrange;
+                break;
+            case "Подключено":
+                statusLbl.ForeColor = Color.ForestGreen;
+                statusToolStripMenuItem.ForeColor = Color.ForestGreen;
+                break;
+        }
+    }
+
+    private void NotifyThroughIcon(String title, String message, int delay)
     {
         
+        notifyIcon1.BalloonTipTitle = title;
+        notifyIcon1.BalloonTipText = message;
+        notifyIcon1.ShowBalloonTip(delay);
+    }
+
+    private void checkBox1_CheckedChanged(object sender, EventArgs e)
+    {
+        Preferences.UpdateShutdown(checkBox1.Checked);
+        preference = Preferences.GetPreference();
+    }
+
+    private void checkBox2_CheckedChanged(object sender, EventArgs e)
+    {
+        Preferences.UpdateRestart(checkBox2.Checked);
+        preference = Preferences.GetPreference();
+    }
+
+    private void checkBox3_CheckedChanged(object sender, EventArgs e)
+    {
+        Preferences.UpdateSleep(checkBox3.Checked);
+        preference = Preferences.GetPreference();
+    }
+
+    private void checkBox4_CheckedChanged(object sender, EventArgs e)
+    {
+        Preferences.UpdateStartOnSystem(checkBox4.Checked);
+        preference = Preferences.GetPreference();
+    }
+    private void checkBox5_CheckedChanged(object sender, EventArgs e)
+    {
+        Preferences.UpdateStartMinimized(checkBox5.Checked);
+        preference = Preferences.GetPreference();
+    }
+
+    private async void onOffToolStripMenuItem_Click(object sender, EventArgs e)
+    {
+        if (serverTask != null && !serverTask.IsCompleted)
+        {
+            _cancellationTokenSource?.Cancel();
+            await serverTask;
+            _udpClient?.Close();
+
+            serverTask = null;
+            _cancellationTokenSource = null;
+
+            onOffToolStripMenuItem.Text = "Включить";
+        }
+        else
+        {
+            _cancellationTokenSource = new CancellationTokenSource();
+            serverTask = StartAsync(COMMAND_PORT, _cancellationTokenSource.Token);
+            onOffToolStripMenuItem.Text = "Выключить";
+        }
+    }
+
+
+    private void checkBox6_CheckedChanged(object sender, EventArgs e)
+    {
+        Preferences.UpdateVideo(checkBox6.Checked);
+        preference = Preferences.GetPreference();
+    }
+
+    private void checkBox7_CheckedChanged(object sender, EventArgs e)
+    {
+        Preferences.UpdateAutoLaunch(checkBox7.Checked);
+        preference = Preferences.GetPreference();
     }
 }
