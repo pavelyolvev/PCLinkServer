@@ -69,8 +69,9 @@ partial class Form1
         button2.Name = "button2";
         button2.Size = new System.Drawing.Size(164, 30);
         button2.TabIndex = 2;
-        button2.Text = "GetCode";
+        button2.Text = "FTP start";
         button2.UseVisualStyleBackColor = true;
+        button2.Click += button2_Click;
         // 
         // label1
         // 
